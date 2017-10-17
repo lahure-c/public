@@ -52,7 +52,7 @@ geompy.addToStudy( OZ, 'OZ' )
 
 # tests ----------------------------------------------------
 
-MakeFuse    = True # False #
+MakeFuse    = False # True # False #
 
 
 meanThreadRadius = 6.375
