@@ -1,0 +1,1714 @@
+# -*- coding: utf-8 -*-
+
+version = "20150304-1712"
+
+
+# pour recharger la bibliothèque depuis la console: reload(<nom_biblio>)
+# exemple: reload(ebt_3d)
+
+import sys
+import salome
+import GEOM
+from salome.geom import geomBuilder
+import math
+import SALOMEDS
+import datetime
+
+def GetSolidList_OrderedFromDistToPoint(geompy, CompoundSolid, RefPoint):
+  """  Measure the minimal distance of all solids indide CompoundSolid
+       returns the list of these solids ordered from min to max distance
+       Returns a list of solid GEOM objects
+       this function was made to replace the buggy function geompy.MinDistanceComponents() with the "SOLID" type
+       here the min distance is the min of the faces' min distances
+  """
+  UnorderedSolidList = geompy.ExtractShapes(CompoundSolid, geompy.ShapeType["SOLID"],isSorted = False)
+  distancesS = []   # tupple: [ (solid object, distanceToPoint), ...]
+  for solid in UnorderedSolidList:
+    UnorderedFaceList = geompy.ExtractShapes(solid, geompy.ShapeType["FACE"],isSorted = False)
+    distancesF = []  # list of distances of faces
+    for face in UnorderedFaceList:    
+      distance_aDistDxDyDz = geompy.MinDistanceComponents(RefPoint, face)  # distance min de chaque face du solide
+      distancesF.append(distance_aDistDxDyDz[0])             
+    distancesS.append((solid,min(distancesF)))                             # objet solide et sa distance min au point
+
+  OrderedSolidTuppleList = sorted(distancesS, key=lambda id: id[1])        # tri suivant la colonne d'indice 1
+  OrderedSolidList = [x[0] for x in OrderedSolidTuppleList]                # extraction de la colonne d'indice 0
+  return OrderedSolidList
+
+
+
+
+
+
+
+def makeNutBolt2(geompy, meanThreadRadius, pitch, height, bBolt=True, nonThreadRadius=0., threadAngle= 90., nbThreads=1., spacetBetweenThread=0., smoothStartLength=0, smoothEndLength=0, rightHanded=True, MakeFuse=False):
+  """Make a bolt or a nut with a 90° thread angle
+  meanThreadRadius is the mean radius of the thread = x2 (rayon moyen de la vis)
+  pitch is the pitch of the screw, the advance length after one turn = z2 (pas de la vis)
+  height is the length of the bolt = z1 (longueur de la vis)
+  bBolt: boolean value,  True makes a bolt, False makes a nut  (True -> vis, False -> Ecrou)
+  nonThreadRadius: outside radius of the nut, or radius of the hole inside bolt (0 for a plain bolt) = x4  
+  threadAngle  in degrees = a1 (angle du filet en degrés
+  spacetBetweenThread = vertical distance in between thread = x4 
+  nbThreads: number of threads (nombre de filets)
+  smoothEndTurns       fade off length of the end of the threads = z5 (longueur d'évanescence des filets)
+  smoothStartLength    like smoothEndTurns
+  rightHanded: True for right handed thread, False for left handed   (pas à droite où à gauche)
+  MakeFuse if True fuses all the components of the screw in a single solid, otherwise return a compound of solids (True -> fusionne la vis)
+  returns a SOLID GEOM_Object
+  """
+
+  dateStart = datetime.datetime.now()
+  outputDebug = False
+  #outputDebug = True
+  if outputDebug:
+    import inspect, os
+    scriptFullPathName = inspect.getfile(inspect.currentframe())
+    scriptDir = os.path.abspath(os.path.dirname(scriptFullPathName))
+    DebugFileName = scriptDir + "/DebugFile_" + str(dateStart);
+    print DebugFileName
+    DebugFile = open(DebugFileName, "w")
+
+  x2 = meanThreadRadius
+  z2 = pitch
+  z1 = height
+  x4 = nonThreadRadius
+  a1 = threadAngle /180.*math.pi
+  z5start = smoothStartLength
+  z5end   = smoothEndLength
+  z3 = z2 / float(nbThreads)
+
+  z4 = spacetBetweenThread
+
+  z6 = z3 - z4
+
+  # what is x1 and x3
+  # x1 -x3 = z6/2 / tan(a1/2)
+  x1Mx3 = z6/2. / math.tan(a1/2.)
+
+  x1 = x2 + x1Mx3/2.
+  x3 = x2 - x1Mx3/2.
+
+  zeroDistance = 1e-7
+
+  if outputDebug:
+    print "x1= ", x1, "  x2= ", x2, "  x3= ", x3, "  x4= ", x4, "  z1= ", z1, "  z2= ", z2, "  z3= ", z3, "  z4= ", z4, "  z6= ", z6, "  nbThreads= ", nbThreads
+
+
+  fuseBuggDistance1 = 0.001     # should be zero
+  bFuseBuggTrick1  = True       # True # False #   should be False. True takes one more boolean operation
+  bFuseBuggTrick2  = True       # False may bugg. True is safer and faster (the final fuse is splitted)
+
+  '''
+  Bugg (no solid output) with:
+  meanThreadRadius = 6.375
+  pitch = 1.5
+  height = 15.
+  bBolt = False
+  nonThreadRadius = meanThreadRadius +2.
+  threadAngle= 90.
+  nbThreads=1
+  smoothStartLength = 0
+  smoothEndLength   = pitch
+  rightHanded = True
+  MakeFuse    = True
+  spacetBetweenThread = 0.04  # or 0 ?
+  fuseBuggDistance1 = 0.0001
+  bFuseBuggTrick1  = True
+  bFuseBuggTrick2  = True or False
+  #
+  solved with fuseBuggDistance1 = 0.001   time 18s
+  solved with bFuseBuggTrick1  = False     time  6s
+  solved with bFuseBuggTrick1=False  and  fuseBuggDistance1 = 0.001    time 5s
+  '''
+
+  '''
+  Bugg (no thread in solid output) with:
+  meanThreadRadius = 6.375
+  pitch = 1.5
+  height = 15.
+  bBolt = False
+  nonThreadRadius = meanThreadRadius +2.
+  threadAngle= 90.
+  nbThreads=1
+  smoothStartLength = pitch
+  smoothEndLength   = pitch
+  rightHanded = True
+  MakeFuse    = True
+  spacetBetweenThread = 0.04  # or 0 ?
+  fuseBuggDistance1 = 0.0001
+  bFuseBuggTrick1  = False
+  bFuseBuggTrick2  = True or False
+  #
+  solved with fuseBuggDistance1 = 0.001   time  5s
+  solved with bFuseBuggTrick1  = True     time 19s
+  '''
+
+  '''
+  Bugg (no thread in solid output  or Boolean operation aborted : non valid shape result) with:
+  meanThreadRadius = 4.7940000000000005
+  pitch = 1.5
+  height = 8.
+  bBolt = False
+  nonThreadRadius = 7.2940000000000005
+  threadAngle= 90.
+  nbThreads=1
+  smoothStartLength = 0
+  smoothEndLength   = 0.8
+  rightHanded = True
+  MakeFuse    = True
+  spacetBetweenThread = 0 # or 0.001 
+  fuseBuggDistance1 = 0.001
+  bFuseBuggTrick1  = False
+  bFuseBuggTrick2  = True
+  #
+  solved with spacetBetweenThread = 0.1
+  solved with bFuseBuggTrick1  = True
+  '''
+
+  # testing the input values -------------------------
+  if x2 <0 or z2 <0 or z1<0 or nbThreads<1 or z5start<0 or z5end<0:
+    print sys._getframe().f_code.co_name, ": error in the parameters: "
+    return None
+
+  # check x4
+  if bBolt:
+    if(x4 < 0):
+      x4 = 0
+    if(x4 > x2):
+      x4 = x2 -1.
+      print "hole radius of the nucleus cannot be greater than x2 it to: ", x2 -1
+
+  else:  # Nut
+    if(x4 < x1):
+      x4 = x1 + 1.
+      print "external radius of the nut cannot be lower than x1 Setting it to: ", x1 +1.
+
+
+
+  # éléments de base -----------------------------
+  O = geompy.MakeVertex(0, 0, 0)
+  OX = geompy.MakeVectorDXDYDZ(1, 0, 0)
+  OY = geompy.MakeVectorDXDYDZ(0, 1, 0)
+  OZ = geompy.MakeVectorDXDYDZ(0, 0, 1)
+  if outputDebug: geompy.addToStudy( O, 'O' )
+  if outputDebug: geompy.addToStudy( OX, 'OX' )
+  if outputDebug: geompy.addToStudy( OY, 'OY' )
+  if outputDebug: geompy.addToStudy( OZ, 'OZ' )
+
+
+  # if bFuseBuggTrick1 ==True, we will use dzNonThreadBooleanBugg
+  dzNonThreadBooleanBugg = 1.
+  coefDzNonThreadBooleanBugg = 1 + 2*dzNonThreadBooleanBugg/z1    # coefficient for scaling the nonThread part along the Z axis
+
+
+  VertexBN_Bottom = geompy.MakeVertex(0, 0, 0)
+  VertexBN_Middle = geompy.MakeVertex(0, 0, z1/2.)
+  # if outputDebug: geompy.addToStudy(VertexBN_Middle, 'VertexBN_Middle')
+  VertexBN_Top    = geompy.MakeVertex(0, 0, z1)
+  VectBN_Axis1  = geompy.MakeVector(VertexBN_Bottom, VertexBN_Top)
+  # if outputDebug: geompy.addToStudy(VectBN_Axis1, 'VectBN_Axis1')
+  VectBN_Axis2  = geompy.MakeVector(VertexBN_Top, VertexBN_Bottom)
+  # if outputDebug: geompy.addToStudy(VectBN_Axis2, 'VectBN_Axis2')
+  # calcul de la taille du plan de coupe
+  planeSize = 3 * (x2+z2)
+  if not bBolt and x4 > x2+z2:
+    planeSize = 3 * x4
+  PlaneBN_Top = geompy.MakePlane(VertexBN_Top, VectBN_Axis1, planeSize)
+  PlaneBN_Bottom = geompy.MakePlane(VertexBN_Bottom, VectBN_Axis1, planeSize)
+  # if outputDebug: geompy.addToStudy( VertexBN_Middle, 'Vertex_Middle' )
+  # if outputDebug: geompy.addToStudy( VertexBN_Top, 'Vertex_Top' )
+  if outputDebug: geompy.addToStudy( PlaneBN_Top, 'Plane_Top' )
+  if outputDebug: geompy.addToStudy( PlaneBN_Bottom, 'Plane_Bottom' )
+
+
+
+  # génération de la spirale pour servir de chemin d'extrusion ------------------------------
+  if outputDebug: print "making spiral path"
+  nbPtsParTour = 512 # or 256.  Number of calculated points per turn
+  P= []      # list of points of the path
+  iCpt =0
+  sensPas = 1.0    # sens du pas: 1 si à droite; -1 si à gauche
+  if not rightHanded:
+    sensPas = -1.0
+
+  smoothingDeltaRadius = math.fabs(x1-x3)  # the size of the thread
+  extraTurns = 2.                          # number of extra spiral turns outside before and after the normal thread, should be an integer
+
+  while True:
+    # height of the spiral point
+    Pz = -extraTurns*z2 + iCpt*z2/float(nbPtsParTour)  # start extraTurns before in order to prepare for a smooth start
+    #  Pz = iCpt*z2/float(nbPtsParTour)  # start @ 0
+    if Pz  > z1 + extraTurns* z2:                # end + extraTurns
+      break
+
+    angle = sensPas * 2*math.pi * iCpt / float(nbPtsParTour)  # angle of the spiral point
+
+    # radius of the spiral point, normally x2, but different if smoothing is required  
+    # in case of a smooth thread, we want the thread size to increase from 0 to its nominal size
+    nominalSpiralRadius = x2 # the nominal value (without smoothing)
+    # we set the smoothed size of the spiral radius of x2 +/- z3
+    if bBolt:
+      smoothedSpiralRadius = x2 - smoothingDeltaRadius
+    else:
+      smoothedSpiralRadius = x2 + smoothingDeltaRadius
+
+    spiralRadius = nominalSpiralRadius   # default radius is the nominal value
+
+    if z5start > 0:
+      # in that case the sketch needs to be translated to abscisse of smoothedSpiralRadius instead of nominalSpiralRadius
+      if Pz < 0:
+        spiralRadius = smoothedSpiralRadius
+      elif Pz < z5start:
+        alpha = math.pi * Pz / z5start  # varie de 0 à pi
+        spiralRadius = smoothedSpiralRadius + (nominalSpiralRadius - smoothedSpiralRadius) *  0.5 * (1 - math.cos(alpha))
+        #if outputDebug: print spiralRadius
+
+    if z5end > 0:
+      if Pz > z1:
+        spiralRadius = smoothedSpiralRadius
+      elif Pz > z1 - z5end:
+        alpha = math.pi * (Pz - (z1 - z5end)) / z5end  # varie de 0 à pi
+        spiralRadius = nominalSpiralRadius - (nominalSpiralRadius - smoothedSpiralRadius) *  0.5 * (1 - math.cos(alpha))
+        # if outputDebug: print spiralRadius
+
+    Px = spiralRadius * math.cos(angle)
+    Py = spiralRadius * math.sin(angle)
+    Pt = geompy.MakeVertex(Px, Py, Pz)
+    # if outputDebug: geompy.addToStudy(Pt,  'P['+str(iCpt)+']')
+    P.append(Pt)                               #  List of points
+    iCpt+=1
+
+  SpiralPath = geompy.MakeInterpol(P, False)  # Path with extra length
+  if outputDebug: geompy.addToStudy(SpiralPath,'SpiralPath')
+  #---------------------------------------------------
+
+
+  #----- thread profile ----------------------------------------
+  if outputDebug: print "making sketch"
+  # Generation of bolt male thread profile
+  sk = geompy.Sketcher3D()
+  sk.addPointsAbsolute(x3, 0, -z6/2.)
+  sk.addPointsAbsolute(x3, 0,  z6/2.)
+  sk.addPointsAbsolute(x1, 0,  0.)
+  sk.close()
+
+  Sketch_Bolt = sk.wire()
+  if outputDebug: geompy.addToStudy(Sketch_Bolt, 'Sketch_Bolt')
+
+  # in the case of a smooth start the sketch needs to be at a the lower radius
+  # then the spiral will grow in radius
+  # if there's no smooth start (even with a smooth end) the sketch is at the nominal radius
+  if z5start > 0:
+    geompy.TranslateDXDYDZ(Sketch_Bolt, -smoothingDeltaRadius, 0, 0)
+  # ---------------------------------------------------------------------------
+
+
+  # génération du croquis d'extrusion ----------------------
+  ExtrudedThreadList = []
+  if bBolt:
+    TheSketch = Sketch_Bolt
+  else:  
+    # the nut female profile is the bolt male thread profile symmetry along the x2 axis + translation
+    Vertex_mR_Bottom = geompy.MakeVertex(x2, 0, 0)
+    Vertex_mR_Top    = geompy.MakeVertex(x2, 0, z1)
+    Vect_mR_Axis     = geompy.MakeVector(Vertex_mR_Bottom, Vertex_mR_Top)
+    if outputDebug: geompy.addToStudy(Vect_mR_Axis, 'Vect_mR_Axis')
+    Sketch_Nut_mirrored = geompy.MakeMirrorByAxis(Sketch_Bolt, Vect_mR_Axis)
+    if outputDebug: geompy.addToStudy( Sketch_Nut_mirrored, "Sketch_Nut_mirrored")
+    TheSketch = Sketch_Nut_mirrored
+
+  if outputDebug: geompy.addToStudy(TheSketch,'TheSketch')
+
+  # génération des extrusions ------------------
+  for iThread in range(int(nbThreads)):
+    if outputDebug: print "Extruding thread ", iThread
+    TheSketch_ = geompy.MakeRotation(TheSketch, OZ, 2*math.pi*iThread/float(nbThreads))
+    if outputDebug: geompy.addToStudyInFather(TheSketch, TheSketch_,'TheSketch_'+ str(iThread))
+
+    ThreadFace_  = geompy.MakeFaceWires([TheSketch_], 1)
+    if outputDebug: geompy.addToStudyInFather(TheSketch, ThreadFace_,'ThreadFace_'+ str(iThread))
+
+    SpiralPath_ = geompy.MakeRotation(SpiralPath, OZ, 2*math.pi*iThread/float(nbThreads))
+    if outputDebug: geompy.addToStudyInFather(SpiralPath, SpiralPath_,'SpiralPath_'+ str(iThread))
+
+    ExtrudedThreadList.append(geompy.MakePipeBiNormalAlongVector(ThreadFace_, SpiralPath_, VectBN_Axis1))
+
+  ExtrudedThreadCompound = geompy.MakeCompound(ExtrudedThreadList)
+  if outputDebug: geompy.addToStudy(ExtrudedThreadCompound, 'ExtrudedThreadCompound')
+  ThreadShellList = geompy.ExtractShapes(ExtrudedThreadCompound, geompy.ShapeType["SHELL"],isSorted = False)
+  icpt=0
+  for shell in ThreadShellList:
+    if outputDebug: geompy.addToStudyInFather(ExtrudedThreadCompound, shell, 'shell-'+ str(icpt))
+    icpt +=1
+  #--------------------------------------------------- 
+
+
+  # pour le rajout du flanc du thread. la partie cylindrique intérieure du filet pour la vis, extérieure pour l'écrou
+  CylFF = geompy.MakeCylinderRH(x3, z1 + 6*z2)
+  geompy.TranslateDXDYDZ(CylFF, 0, 0, -3*z2)  # décalage du cylindre pour accélérer le partionnement: absence de surfaces coplanaires accélère le partitionnement
+  if outputDebug: geompy.addToStudy( CylFF, 'CylFF' )
+
+  CylFF_revList = geompy.GetShapesOnCylinder(CylFF, geompy.ShapeType["FACE"], OZ, x3, GEOM.ST_ON)
+  CylFF_rev = geompy.MakeCompound(CylFF_revList)
+  if outputDebug: geompy.addToStudy( CylFF_rev, 'CylFF_rev' )
+  #--------------------------------------------------------
+
+  SolidThreadList = []
+  for iThread in range(int(nbThreads)):    # for each thread
+
+    if outputDebug: print "Partitionning the extrusion ", iThread
+    # partionnement suivant les plans horizontaux
+    ExtrudedThreadPartition = geompy.MakePartition([ExtrudedThreadList[iThread]], [PlaneBN_Bottom, PlaneBN_Top], [], [], geompy.ShapeType["SOLID"], 0, [], 0)
+    if outputDebug: geompy.addToStudyInFather(ExtrudedThreadCompound, ExtrudedThreadPartition, 'ExtrudedThreadPartition-'+ str(iThread))
+
+    if outputDebug: print "Getting the middle solid of extrusion ", iThread
+    ordSList = GetSolidList_OrderedFromDistToPoint(geompy, ExtrudedThreadPartition, VertexBN_Middle)
+
+    if outputDebug:
+      icpt=0
+      for solid in ordSList:
+        geompy.addToStudyInFather(ExtrudedThreadPartition, solid, 'orderedSolid-'+ str(iThread) + '-' + str(icpt))
+        icpt +=1
+
+    if len(ordSList) != 3 :
+      print sys._getframe().f_code.co_name, " Error in ExtrudedThreadPartition, instead of 3 solids, got ",len(ordSList)
+      return None 
+
+    MiddleSolid = ordSList[0]   # le solide le plus proche du point
+    if outputDebug: geompy.addToStudyInFather(ExtrudedThreadPartition, MiddleSolid, 'MidlleSolid-'+ str(iThread))
+    #---------------------
+
+    SolidThreadList.append(MiddleSolid)   # stores the object
+
+
+  # ------------------------------------------------------
+
+  if outputDebug:
+    print "Making final thread "
+    DebugFile.write("Making final thread\n")
+
+
+  if bBolt:
+    CylPlain = geompy.MakeCylinderRH(x3 +fuseBuggDistance1, z1)  # plain part of the screw
+    if x4 > zeroDistance:                         # case of a hole in the nucleus
+      CylCut = geompy.MakeCylinderRH(x4, z1)   # hollow part of the screw is CylCut
+      CylNucleus = geompy.MakeCut(CylPlain,CylCut)
+    else:
+      CylNucleus = CylPlain
+
+    if MakeFuse and bFuseBuggTrick1:   # we make it taller to avoid fuse buggs - we'll cut it after the fuse
+      CylNucleus = geompy.MakeScaleAlongAxes(CylNucleus, VertexBN_Middle, 1, 1, coefDzNonThreadBooleanBugg)
+    if outputDebug: geompy.addToStudy(CylNucleus, 'CylNucleus')
+    SolidThreadList.insert(0, CylNucleus)   # in the first place for helping the use operation
+
+  else:  # nut
+    CylPlain = geompy.MakeCylinderRH(x4, z1)      
+    if outputDebug: geompy.addToStudy(CylPlain, "CylPlain")
+
+    CylCut = geompy.MakeCylinderRH(x1 -fuseBuggDistance1, z1)
+    if outputDebug: geompy.addToStudy(CylCut, "CylCut")
+
+    CylPipe = geompy.MakeCut(CylPlain, CylCut)
+    if MakeFuse and bFuseBuggTrick1:   # we make it taller to avoid fuse buggs - we'll cut it after the fuse
+      CylPipe = geompy.MakeScaleAlongAxes(CylPipe, VertexBN_Middle, 1, 1, coefDzNonThreadBooleanBugg)
+
+    if outputDebug: geompy.addToStudy(CylPipe, 'CylPipe')
+    SolidThreadList.insert(0, CylPipe)      # in the first place for helping the fuse operation
+
+  FinalSolid = geompy.MakeCompound(SolidThreadList)       
+
+
+  # fuse all the components together
+  if MakeFuse:
+    if outputDebug: print "Fusing threads with body"
+
+    if len(SolidThreadList) <=2 or not bFuseBuggTrick2:   # when there are only two objects or we don't care about the bugg, we use the simplest fuse method
+      # fuse method: only one fuse (simplest)
+      if outputDebug:
+        date01 = datetime.datetime.now()
+        DebugFile.write("only one fuse\n")
+        DebugFile.flush()
+      FinalSolid = geompy.MakeFuseList(SolidThreadList)
+      if outputDebug:
+        date02 = datetime.datetime.now()
+        DebugFile.write("  time spent= {}\n" .format(date02-date01))
+        DebugFile.flush()
+
+    else:   # whith multiple thread it may bugg, we need a different fuse method
+      if True:
+        # fuse method: even and odd (fastest)
+        # fuse is made in 3 times: 1: nucleus + even threads; 2: nucleus + odd threads; 3: fuse of the the 2 fuses
+        # this way the fuse avoid fusing contiguous threads
+        evenList=[]
+        oddList=[]
+        evenList.append(SolidThreadList[0])
+        oddList.append(SolidThreadList[0])
+        ii = 1
+        for ii in range(1, len(SolidThreadList)):
+          if ii%2==0:
+            evenList.append(SolidThreadList[ii])
+          else:
+            oddList.append(SolidThreadList[ii])
+
+        if outputDebug:
+          date01 = datetime.datetime.now()
+          DebugFile.write("even fuse operation started, numb of threads={}\n" .format(len(evenList)))
+          DebugFile.flush()
+        evenFuse = geompy.MakeFuseList(evenList, False, False)
+        if outputDebug:  geompy.addToStudy(evenFuse, "evenFuse")
+
+        if outputDebug:
+          date02 = datetime.datetime.now()
+          DebugFile.write("  time spent= {}\n" .format(date02-date01))
+          DebugFile.write("odd fuse operation started, numb of threads={}\n" .format(len(oddList)))
+          DebugFile.flush()
+        oddFuse  = geompy.MakeFuseList(oddList, False, False)
+        if outputDebug:  geompy.addToStudy(oddFuse, "oddFuse")
+
+        if outputDebug:
+          date03 = datetime.datetime.now()
+          DebugFile.write("  time spent= {}\n" .format(date03-date02))
+          DebugFile.write("even and odd fuse operation started\n")
+          DebugFile.flush()
+        FinalSolid = geompy.MakeFuseList([evenFuse, oddFuse], False, False)
+        if outputDebug:
+          date04 = datetime.datetime.now()
+          DebugFile.write("  time spent= {}\n" .format(date04-date03))
+          DebugFile.flush()
+
+      else:
+        # fuse method: two by two (was the safest ?)
+        # fuse is made progressively, two by two, in order to avoid the bugs
+        FinalSolid = SolidThreadList[0]
+        for ii in range(1, len(SolidThreadList)):
+          if outputDebug:
+            dateIterationStart = datetime.datetime.now()
+            DebugFile.write("2 by 2 fuse operation iteraton num= {}\n" .format(ii))
+            DebugFile.flush()
+
+          FinalSolid = geompy.MakeFuse(FinalSolid, SolidThreadList[ii], False, False)
+
+          if outputDebug:
+            dateIterationStop = datetime.datetime.now()
+            DebugFile.write("time spent= {}\n" .format(dateIterationStop-dateIterationStart))
+            DebugFile.write("\n")
+            DebugFile.flush()
+
+  # fin bMakeFuse
+
+
+  if MakeFuse and bFuseBuggTrick1:
+    CylPlainReal = geompy.MakeCylinderRH(max([x4 +1., x2 + z3/4.0 +1.]), z1)  # cut along z axis only
+    if outputDebug:  geompy.addToStudy(FinalSolid, 'FinalSolidbeforeFuse')
+    if outputDebug:  geompy.addToStudy(CylPlainReal, 'CylPlainReal')      
+    FinalSolid = geompy.MakeCommonList([CylPlainReal, FinalSolid])
+
+
+  if outputDebug:
+    geompy.addToStudy(FinalSolid, 'FinalSolid')
+    ii = 0
+    for solid in SolidThreadList:
+      geompy.addToStudyInFather(FinalSolid, solid, 'solid_'+ str(ii))
+      ii+=1
+
+
+  dateStop = datetime.datetime.now()
+  if outputDebug:
+    DebugFile.write("Fin, temps de calcul = {0}\n" .format(dateStop - dateStart))
+    DebugFile.close()
+
+  return FinalSolid
+
+
+
+
+
+
+
+
+
+
+
+minimumPlayForNutBolt = 0.04
+
+# threadings
+# making nut or bolt centered on OZ starting from O in +Z direction
+# with 45° flank angle
+# meanFiletRadius = mean radius of the filet
+# pitch of the thread
+# height = length of the nut or bolt
+# play = distance between the flanks of two centered filets
+# résultat différent entre smoothEndTurns et smoothStartTurns
+
+def makeNutBolt(geompy, meanFiletRadius, pitch, height, play, Bolt, NonFiletRadius, nbFilets=1, smoothStartTurns=0, \
+                  smoothEndTurns=0, pasADroite=True, MakeFuse=False, smoothingDeltaFactor=1.0):
+  """Make a bolt or a nut with a 90° thread angle
+  meanFiletRadius is the mean radius of the thread, it the same value for a nut bolt pair
+  pitch is the distance of the move along the screw axis after one turn
+  height is the length of the bolt, or the width of the nut
+  play is the material removal so that the real filet radius of the bolt is not mean radius + pitch/nbFilets/4, but mean radius + pitch/nbFilets/4 - play
+      voir cahier violet 31/1/2014
+  Bolt: True makes a bolt, False makes a nut
+  NonFiletRadius: outside radius of the bolt or nut, put a negative value to have the filets only
+  pasADroite: True for right handed thread, False for left handed
+  nbFilets number of filets
+  smoothEndTurns number of turns with a progressive fade off of the ending filet
+  MakeFuse if True fuses all the components of the nut/bolt in a single solid, otherwise return a compound of solids
+  smoothingDeltaFactor is used to compute the mean radius of the smoothed filet = meanFiletRadius +/- smoothingDeltaFactor * profileSize/2.0
+    with profileSize = pitch/nbFilets
+  The large radius of the bolt filet is meanFiletRadius + pitch/nbFilet/4 -play
+  The large radius of the nut  filet is meanFiletRadius + pitch/nbFilet/4 
+  The small radius of the bolt filet is meanFiletRadius - pitch/nbFilet/4
+  The small radius of the nut  filet is meanFiletRadius - pitch/nbFilet/4 +play
+  returns a SOLID GEOM_Object
+  """
+
+  dateStart = datetime.datetime.now()
+    
+  outputDebug = False
+  #outputDebug = True
+  if outputDebug:
+    import inspect, os
+    scriptFullPathName = inspect.getfile(inspect.currentframe())
+    scriptDir = os.path.abspath(os.path.dirname(scriptFullPathName))
+    DebugFileName = scriptDir + "/DebugFile_" + str(dateStart);
+    print DebugFileName
+    DebugFile = open(DebugFileName, "w")
+    #DebugFile = open("DebugFile", "w")
+
+
+    
+  zeroDistance = 1e-7
+
+  # the program buggs for a play value too close to zero ------------------
+  if play < minimumPlayForNutBolt:
+    play = minimumPlayForNutBolt     # avec Salomé 7.4 et 7.5.1: plantage en-dessous de 3e-2 -> plantage.  erreur spéciale à 2e-2
+  # -------------------------------------------------------------------------
+
+  # testing the input values -------------------------
+  if meanFiletRadius <0 or pitch <0 or height<0 or nbFilets<1 or smoothEndTurns<0:
+    print sys._getframe().f_code.co_name, ": error in the parameters: "
+    # return None
+
+  # in the case of multiple filets, the size of the profile is less
+  # the size of the profile is: 2 x ( the deepness of the filet + play )
+  # the size of the profile is the width of the filet  (including play)
+  profileSize = pitch/float(nbFilets)
+
+  # non filet radius
+  # solidRadius = the non filet radius closest to the filet, largest for the bolt, smallest fot the nut 
+  if Bolt:
+    solidRadius = meanFiletRadius - profileSize/4.0
+    if NonFiletRadius<0:   # a negative NonFiletRadius will remove the nucleus of the bolt
+       # in that default case, we do not remove completely the nucleus, we set it to the minimum value that it won't mess up with a later user fuse. see below
+      NonFiletRadius = solidRadius - profileSize/4.0     # almost all the non filet part is removed. only remain a pipe of thickness "profileSize/4.0"
+    if(NonFiletRadius > solidRadius):
+      NonFiletRadius = solidRadius
+      print "hole radius of the nucleus cannot be greater than meanFiletRadius - pitch/nbFilet/4. Setting it to: ", NonFiletRadius                    
+    if outputDebug: print "The external radius of the bolt is: meanFiletRadius + pitch/4/nbFilets -play =", meanFiletRadius + pitch/4.0/float(nbFilets) -play
+
+  else:  # Nut
+    solidRadius = meanFiletRadius + profileSize/4.0
+    if(NonFiletRadius < solidRadius):
+      if NonFiletRadius >0:    # it's not possible to have the external diameter smaller then solidRadius
+        print "external radius of the nut cannot be lower than meanFiletRadius + pitch/nbFilet/4. Setting it to: ", solidRadius
+      # a null or negative NonFiletRadius do not trigger the message above
+      # if the NonFiletRadius is not set, we set it to the minimum value that it won't mess up with a later user fuse, see below
+      NonFiletRadius = solidRadius + profileSize/4.0     # almost all the non filet part is removed. only remain a pipe of thickness "profileSize/4.0"
+      if outputDebug: print "The internal radius of the nut is: meanFiletRadius - pitch/4/nbFilets + play =", meanFiletRadius -pitch/4.0/float(nbFilets) + play
+      if outputDebug: print "The external radius of the nut is: ", NonFiletRadius
+
+
+  if meanFiletRadius <0 or pitch <0 or height<0 or nbFilets<1 or smoothEndTurns<0:
+    print sys._getframe().f_code.co_name, ": error in the parameters: "
+    # return None
+
+  # minimum mean filet radius
+  # the closest distance to the center is for point B':   B'.x = meanFiletRadius - profileSize/4.0 - play/sqrt2/2.0
+  # so let's say that meanFiletRadius - profileSize/4.0 > 0
+  if meanFiletRadius - profileSize/4.0 <= 0 :
+    print sys._getframe().f_code.co_name, "meanFiletRadius - pitch/nbFilets/4 should be positive, aborting"
+    # return None
+  # -------------------------------------
+    
+
+  # éléments de base -----------------------------
+  O = geompy.MakeVertex(0, 0, 0)
+  OX = geompy.MakeVectorDXDYDZ(1, 0, 0)
+  OY = geompy.MakeVectorDXDYDZ(0, 1, 0)
+  OZ = geompy.MakeVectorDXDYDZ(0, 0, 1)
+  if outputDebug: geompy.addToStudy( O, 'O' )
+  if outputDebug: geompy.addToStudy( OX, 'OX' )
+  if outputDebug: geompy.addToStudy( OY, 'OY' )
+  if outputDebug: geompy.addToStudy( OZ, 'OZ' )
+
+
+  # bugg avec SALOME-8.2.0-DB8.5   mais pas avec SALOME-7.6.0-DB07
+  dzBooleanBugg = 0.05  # (0.03 mini sur un essai) le filet de la vis est un peu plus court du bas et du haut, de cette distance pour éviter le bugg du Fuse avec le corps de la vis
+  """
+  avec les valeurs
+    meanFiletRadius = 8
+    pitch = 2
+    height = 8
+    play =0
+    Bolt = False
+    NonFiletRadius=-1
+    nbFilets=1
+    smoothStartTurns=0
+    smoothEndTurns=0
+    pasADroite=True
+    MakeFuse=True
+    smoothingDeltaFactor = 1.0
+  on ne peut pas mettre moins de 0.03 pour que le filet fusionne bien avec le corps
+  """
+
+  VertexBN_Bottom = geompy.MakeVertex(0, 0, dzBooleanBugg)
+  VertexBN_Middle = geompy.MakeVertex(0, 0, height/2.0)
+  # if outputDebug: geompy.addToStudy(VertexBN_Middle, 'VertexBN_Middle')
+  VertexBN_Top    = geompy.MakeVertex(0, 0, height -dzBooleanBugg)
+  VectBN_Axis1  = geompy.MakeVector(VertexBN_Bottom, VertexBN_Top)
+  # if outputDebug: geompy.addToStudy(VectBN_Axis1, 'VectBN_Axis1')
+  VectBN_Axis2  = geompy.MakeVector(VertexBN_Top, VertexBN_Bottom)
+  # if outputDebug: geompy.addToStudy(VectBN_Axis2, 'VectBN_Axis2')
+  # calcul de la taille du plan de coupe
+  planeSize = 3 * (meanFiletRadius+pitch)
+  if not Bolt and NonFiletRadius > meanFiletRadius+pitch:
+    planeSize = 3 * NonFiletRadius
+  PlaneBN_Top = geompy.MakePlane(VertexBN_Top, VectBN_Axis1, planeSize)
+  PlaneBN_Bottom = geompy.MakePlane(VertexBN_Bottom, VectBN_Axis1, planeSize)
+  # if outputDebug: geompy.addToStudy( VertexBN_Middle, 'Vertex_Middle' )
+  # if outputDebug: geompy.addToStudy( VertexBN_Top, 'Vertex_Top' )
+  if outputDebug: geompy.addToStudy( PlaneBN_Top, 'Plane_Top' )
+  if outputDebug: geompy.addToStudy( PlaneBN_Bottom, 'Plane_Bottom' )
+
+
+
+  # génération de la spirale pour servir de chemin d'extrusion ------------------------------
+  if outputDebug: print "making spiral path"
+  nbPtsParTour = 512 # or 256.  Number of calculated points per turn
+  P= []      # list of points of the path
+  iCpt =0
+  sensPas = 1.0    # sens du pas: 1 si à droite; -1 si à gauche
+  if not pasADroite:
+    sensPas = -1.0
+
+
+  # we choose the the difference radius grossly, so that the very begining (or ending) flat does not appear with smoothEndTurns = 1     
+  smoothingDeltaRadius = profileSize/2.0 * smoothingDeltaFactor
+
+  while True:
+    # height of the spiral point
+    Pz = -2*pitch + iCpt*pitch/float(nbPtsParTour)  # start few flets before in order to prepare for a smooth start
+                                                    # 'few' should be an integer
+  #  Pz = iCpt*pitch/float(nbPtsParTour)  # start @ 0
+    if Pz  > height + 1.25 * pitch:               # end   about one filet after
+      break
+
+    angle = sensPas * 2*math.pi * iCpt / float(nbPtsParTour)  # angle of the spiral point
+
+    # radius of the spiral point, normally meanFiletRadius, but different if smoothing is required  
+    # in case of a smooth filet, we want the filet size to increase from 0 to its nominal size
+    nominalSpiralRadius = meanFiletRadius # the nominal value (without smoothing)
+    # we set the smoothed size of the spiral radius of meanFiletRadius +/- profileSize
+    if Bolt:
+      smoothedSpiralRadius = meanFiletRadius - smoothingDeltaRadius
+    else:
+      smoothedSpiralRadius = meanFiletRadius + smoothingDeltaRadius
+
+    spiralRadius = nominalSpiralRadius   # default radius is the nominal value
+
+    if smoothStartTurns > 0:
+      # in that case the sketch needs to be translated to abscisse of smoothedSpiralRadius instead of nominalSpiralRadius
+      if Pz < 0:
+        spiralRadius = smoothedSpiralRadius
+      elif Pz < smoothStartTurns * pitch:
+        alpha = math.pi * Pz / (smoothStartTurns * pitch)  # varie de 0 à pi
+        spiralRadius = smoothedSpiralRadius + (nominalSpiralRadius - smoothedSpiralRadius) *  0.5 * (1 - math.cos(alpha))
+        #if outputDebug: print spiralRadius
+
+    if smoothEndTurns > 0:
+      if Pz > height:
+        spiralRadius = smoothedSpiralRadius
+      elif Pz > height - smoothEndTurns * pitch:
+        alpha = math.pi * (Pz - (height - smoothEndTurns * pitch)) / (smoothEndTurns * pitch)  # varie de 0 à pi
+        spiralRadius = nominalSpiralRadius - (nominalSpiralRadius - smoothedSpiralRadius) *  0.5 * (1 - math.cos(alpha))
+        # if outputDebug: print spiralRadius
+
+    Px = spiralRadius * math.cos(angle)
+    Py = spiralRadius * math.sin(angle)
+    Pt = geompy.MakeVertex(Px, Py, Pz)
+    # if outputDebug: geompy.addToStudy(Pt,  'P['+str(iCpt)+']')
+    P.append(Pt)                               #  List of points
+    iCpt+=1
+
+  SpiralPath = geompy.MakeInterpol(P, False)  # Path with extra length
+  if outputDebug: geompy.addToStudy(SpiralPath,'SpiralPath')
+  #---------------------------------------------------
+
+
+  #----- filet profile ----------------------------------------
+  if outputDebug: print "making sketch"
+  # Generation of bolt male filet profile, du point A' au point F'
+  # the internal radius of the filet   is meanFiletRadius - profileSize/4.0
+  # the internal radius of the profile is meanFiletRadius - profileSize
+  sqrt2 = math.sqrt(2)
+
+  sk = geompy.Sketcher3D()
+  #sk.addPointsAbsolute(meanFiletRadius - profileSize                     , 0, - profileSize/2.0 + play/sqrt2)                 # A
+  #sk.addPointsAbsolute(meanFiletRadius - profileSize/4.0                 , 0, - profileSize/2.0 + play/sqrt2)                 # B
+  #sk.addPointsAbsolute(meanFiletRadius - profileSize - play/sqrt2/2.0      , 0, - profileSize/2.0 + play/sqrt2/2.0)     # A'
+  sk.addPointsAbsolute(meanFiletRadius - profileSize/4.0 - play/sqrt2/2.0  , 0, - profileSize/2.0 + play/sqrt2/2.0)     # B'
+  sk.addPointsAbsolute(meanFiletRadius + profileSize/4.0 - 1.5*play/sqrt2  , 0, - play/sqrt2/2.0)                   # C
+  sk.addPointsAbsolute(meanFiletRadius + profileSize/4.0 - 1.5*play/sqrt2  , 0,   play/sqrt2/2.0)                   # D
+  sk.addPointsAbsolute(meanFiletRadius - profileSize/4.0 - play/sqrt2/2.0  , 0,   profileSize/2.0 - play/sqrt2/2.0)     # E'
+  #sk.addPointsAbsolute(meanFiletRadius - profileSize - play/sqrt2/2.0      , 0,   profileSize/2.0 - play/sqrt2/2.0)     # F'    
+  #sk.addPointsAbsolute(meanFiletRadius - profileSize/4.0                 , 0, profileSize/2.0     - play/sqrt2)     # E
+  #sk.addPointsAbsolute(meanFiletRadius - profileSize                     , 0, profileSize/2.0     - play/sqrt2)     # F    
+  sk.close()
+  Sketch_Bolt = sk.wire()
+  if outputDebug: geompy.addToStudy(Sketch_Bolt, 'Sketch_Bolt')
+
+  # in the case of a smooth start the sktech needs to be at a the lower radius
+  # then the spiral will grow in radius
+  # if there's no smooth start (even with a smooth end) the sketch is at the nominal radius
+  if smoothStartTurns > 0:
+    geompy.TranslateDXDYDZ(Sketch_Bolt, -smoothingDeltaRadius, 0, 0)
+  # ---------------------------------------------------------------------------
+
+
+  # génération du croquis d'extrusion ----------------------
+  ExtrudedFiletList = []
+  if Bolt:
+    TheSketch = Sketch_Bolt
+  else:  
+    # the nut female profile is the bolt male filet profile symmetry along the meanFiletRadius axis + translation
+    Vertex_mR_Bottom = geompy.MakeVertex(meanFiletRadius, 0, 0)
+    Vertex_mR_Top    = geompy.MakeVertex(meanFiletRadius, 0, height)
+    Vect_mR_Axis     = geompy.MakeVector(Vertex_mR_Bottom, Vertex_mR_Top)
+    # if outputDebug: geompy.addToStudy(Vect_mR_Axis, 'Vect_mR_Axis')
+    Sketch_Nut_mirrored = geompy.MakeMirrorByAxis(Sketch_Bolt, Vect_mR_Axis)
+    # if outputDebug: geompy.addToStudy(Sketch_Nut_mirrored, 'Sketch_Nut_mirrored')
+    # the nut female profile is to be translated in OZ  profileSize/2 higher
+    Sketch_Nut = geompy.MakeTranslation(Sketch_Nut_mirrored, 0, 0, profileSize/2.0)  
+    # if outputDebug: geompy.addToStudy(Sketch_Nut, 'Sketch_Nut')
+    TheSketch = Sketch_Nut
+
+  if outputDebug: geompy.addToStudy(TheSketch,'TheSketch')
+
+  # génération des extrusions ------------------
+  for iFilet in range(int(nbFilets)):
+    if outputDebug: print "Extruding filet ", iFilet
+    TheSketch_ = geompy.MakeRotation(TheSketch, OZ, 2*math.pi*iFilet/float(nbFilets))
+    if outputDebug: geompy.addToStudyInFather(TheSketch, TheSketch_,'TheSketch_'+ str(iFilet))
+
+    FiletFace_  = geompy.MakeFaceWires([TheSketch_], 1)
+    if outputDebug: geompy.addToStudyInFather(TheSketch, FiletFace_,'FiletFace_'+ str(iFilet))
+
+    SpiralPath_ = geompy.MakeRotation(SpiralPath, OZ, 2*math.pi*iFilet/float(nbFilets))
+    if outputDebug: geompy.addToStudyInFather(SpiralPath, SpiralPath_,'SpiralPath_'+ str(iFilet))
+
+    ExtrudedFiletList.append(geompy.MakePipeBiNormalAlongVector(FiletFace_, SpiralPath_, VectBN_Axis1))
+    #ExtrudedFiletList.append(geompy.MakePipeBiNormalAlongVector(TheSketch_, SpiralPath_, VectBN_Axis1))
+
+  ExtrudedFiletCompound = geompy.MakeCompound(ExtrudedFiletList)
+  if outputDebug: geompy.addToStudy(ExtrudedFiletCompound, 'ExtrudedFiletCompound')
+  FiletShellList = geompy.ExtractShapes(ExtrudedFiletCompound, geompy.ShapeType["SHELL"],isSorted = False)
+  icpt=0
+  for shell in FiletShellList:
+    if outputDebug: geompy.addToStudyInFather(ExtrudedFiletCompound, shell, 'shell-'+ str(icpt))
+    icpt +=1
+  #--------------------------------------------------- 
+
+
+  # pour le rajout du flanc du filet. la partie cylindrique intérieure du filet pour la vis, extérieure pour l'écrou
+  CylFF = geompy.MakeCylinderRH(solidRadius, height + 6*pitch)
+  geompy.TranslateDXDYDZ(CylFF, 0, 0, -3*pitch)  # décalage du cylindre pour accélérer le partionnement: absence de surfaces coplanaires accélère le partitionnement
+  if outputDebug: geompy.addToStudy( CylFF, 'CylFF' )
+
+  CylFF_revList = geompy.GetShapesOnCylinder(CylFF, geompy.ShapeType["FACE"], OZ, solidRadius, GEOM.ST_ON)
+  CylFF_rev = geompy.MakeCompound(CylFF_revList)
+  if outputDebug: geompy.addToStudy( CylFF_rev, 'CylFF_rev' )
+  #--------------------------------------------------------
+
+  SolidFiletList = []
+  for iFilet in range(int(nbFilets)):    # for each filet
+
+    if outputDebug: print "Partitionning the extrusion ", iFilet
+    # partionnement suivant les plans horizontaux
+    ExtrudedFiletPartition = geompy.MakePartition([ExtrudedFiletList[iFilet]], [PlaneBN_Bottom, PlaneBN_Top], [], [], geompy.ShapeType["SOLID"], 0, [], 0)
+    if outputDebug: geompy.addToStudyInFather(ExtrudedFiletCompound, ExtrudedFiletPartition, 'ExtrudedFiletPartition-'+ str(iFilet))
+
+    if outputDebug: print "Getting the middle solid of extrusion ", iFilet
+    ordSList = GetSolidList_OrderedFromDistToPoint(geompy, ExtrudedFiletPartition, VertexBN_Middle)
+
+    if outputDebug:
+      icpt=0
+      for solid in ordSList:
+        geompy.addToStudyInFather(ExtrudedFiletPartition, solid, 'orderedSolid-'+ str(iFilet) + '-' + str(icpt))
+        icpt +=1
+
+    if len(ordSList) != 3 :
+      print sys._getframe().f_code.co_name, " Error in ExtrudedFiletPartition, instead of 3 solids, got ",len(ordSList)
+      # return None 
+
+    MiddleSolid = ordSList[0]   # le solide le plus proche du point
+    if outputDebug: geompy.addToStudyInFather(ExtrudedFiletPartition, MiddleSolid, 'MidlleSolid-'+ str(iFilet))
+    #---------------------
+
+
+    # do we want the filets only ?  --------------------
+    if math.fabs(NonFiletRadius - solidRadius) > zeroDistance :   # condition for the existence of an extra nucleus or pipe
+      WeJustWantTheFilets = False
+      SolidFiletList.append(MiddleSolid)   # stores the object
+    else:
+      # if we want the filet only: we have to cut off along the radius solidRadius,
+      # because we need to remove the extra part around points B' and E' 
+
+      WeJustWantTheFilets = True
+
+      # partionnement suivant l'axe de la vis, pour ne garder que le filet médian
+      if outputDebug: print "Partitionning the middle solid ", iFilet
+      PartitionMiddleSolid = geompy.MakePartition([MiddleSolid], [CylFF_rev], [], [], geompy.ShapeType["SOLID"], 0, [], 0)
+      if outputDebug: geompy.addToStudyInFather(ExtrudedFiletCompound, PartitionMiddleSolid, 'PartitionMiddleSolid'+ str(iFilet))
+
+      if outputDebug: print "Getting the filet ", iFilet
+      ordSList = GetSolidList_OrderedFromDistToPoint(geompy, PartitionMiddleSolid, VertexBN_Middle)
+
+      if outputDebug:
+        icpt=0
+        for solid in ordSList:
+          geompy.addToStudyInFather(PartitionMiddleSolid, solid, 'orderedSolid-'+ str(iFilet) + '-' + str(icpt))
+          icpt +=1
+
+      if len(ordSList) != 2 :
+        print sys._getframe().f_code.co_name, " Error in PartitionMiddleSolid, instead of 2 solids, got ",len(distancesS)
+        # return None 
+
+      if Bolt:          # the filet is the furthest solid
+        ThisFiletSolid = ordSList[1]
+      else:
+        ThisFiletSolid = ordSList[0]
+
+      if outputDebug: geompy.addToStudyInFather(PartitionMiddleSolid, ThisFiletSolid, 'filet-'+ str(iFilet))
+      SolidFiletList.append(ThisFiletSolid)
+
+
+  # ------------------------------------------------------
+
+  if outputDebug:
+    print "Making final filet "
+    DebugFile.write("Making final filet\n")
+
+
+  if WeJustWantTheFilets:  # if we do not want another component for the screw, just return the filets
+    FinalSolid = geompy.MakeCompound(SolidFiletList)
+  else:  # compound of all the components of the screw
+    if Bolt:
+      CylPlain = geompy.MakeCylinderRH(solidRadius, height)  # plain part of the screw
+      if NonFiletRadius > zeroDistance:                         # case of a hole in the nucleus
+        CylCut = geompy.MakeCylinderRH(NonFiletRadius, height + 2)   # hollow part of the screw is CylCut
+        geompy.TranslateDXDYDZ(CylCut, 0, 0, -1)
+        CylNucleus = geompy.MakeCut(CylPlain,CylCut)
+      else:
+        CylNucleus = CylPlain
+      if outputDebug: geompy.addToStudy(CylNucleus, 'CylNucleus')
+      SolidFiletList.insert(0, CylNucleus)   # in the first place for helping the use operation
+      
+    else:  # nut
+      CylPlain = geompy.MakeCylinderRH(NonFiletRadius, height)    
+      CylCut = geompy.MakeCylinderRH(solidRadius, height + 2)
+      geompy.TranslateDXDYDZ(CylCut, 0, 0, -1)
+      CylPipe = geompy.MakeCut(CylPlain,CylCut)
+      if outputDebug: geompy.addToStudy(CylPipe, 'CylPipe')
+      SolidFiletList.insert(0, CylPipe)      # in the first place for helping the use operation   
+
+    FinalSolid = geompy.MakeCompound(SolidFiletList)       
+
+    # fuse all the components together
+    if MakeFuse:
+      if outputDebug: print "Fusing filets with body"
+
+      # fuse method: only one fuse (simplest)
+      """
+      if outputDebug:
+        date01 = datetime.datetime.now()
+        DebugFile.write("only one fuse\n")
+        DebugFile.flush()
+      FinalSolid = geompy.MakeFuseList(SolidFiletList)
+      if outputDebug:
+        date02 = datetime.datetime.now()
+        DebugFile.write("  time spent= {}\n" .format(date02-date01))
+        DebugFile.flush()
+      """
+      
+      # fuse method: even and odd (fastest)
+      """
+      # fuse is made in 3 times: 1:nucleus + even filets; 2: nucleus+odd filets; 3- fuse of the the 2 fuse
+      # this way the fuse avoid fusing contiguous filets
+      eventList=[]
+      oddList=[]
+      eventList.append(SolidFiletList[0])
+      oddList.append(SolidFiletList[0])
+      ii = 1
+      for ii in range(1, len(SolidFiletList)):
+        if ii%2==0:
+          eventList.append(SolidFiletList[ii])
+        else:
+          oddList.append(SolidFiletList[ii])
+
+      if outputDebug:
+        date01 = datetime.datetime.now()
+        DebugFile.write("even fuse operation started, numb of filets={}\n" .format(len(eventList)))
+        DebugFile.flush()
+      evenFuse = geompy.MakeFuseList(eventList, False, False)
+      if outputDebug:
+        date02 = datetime.datetime.now()
+        DebugFile.write("  time spent= {}\n" .format(date02-date01))
+        DebugFile.write("odd fuse operation started, numb of filets={}\n" .format(len(oddList)))
+        DebugFile.flush()
+      oddFuse  = geompy.MakeFuseList(oddList, False, False)
+      if outputDebug:
+        date03 = datetime.datetime.now()
+        DebugFile.write("  time spent= {}\n" .format(date03-date02))
+        DebugFile.write("even and odd fuse operation started\n")
+        DebugFile.flush()
+      FinalSolid = geompy.MakeFuseList([evenFuse, oddFuse], False, False)
+      if outputDebug:
+        date04 = datetime.datetime.now()
+        DebugFile.write("  time spent= {}\n" .format(date04-date03))
+        DebugFile.flush()
+      """
+
+      # fuse method: two by two (safest)
+      # fuse is made progressively, two by two, in order to avoid the bugs
+      FinalSolid = SolidFiletList[0]
+      for ii in range(1, len(SolidFiletList)):
+        if outputDebug:
+          dateIterationStart = datetime.datetime.now()
+          DebugFile.write("2 by 2 fuse operation iteraton num= {}\n" .format(ii))
+          DebugFile.flush()
+          
+        FinalSolid = geompy.MakeFuse(FinalSolid, SolidFiletList[ii], False, False)
+                                              
+        if outputDebug:
+          dateIterationStop = datetime.datetime.now()
+          DebugFile.write("time spent= {}\n" .format(dateIterationStop-dateIterationStart))
+          DebugFile.write("\n")
+          DebugFile.flush()
+          
+    # fin bMakeFuse
+        
+        
+    if outputDebug:
+      geompy.addToStudy(FinalSolid, 'FinalSolid')
+    ii = 0
+    for solid in SolidFiletList:
+      geompy.addToStudyInFather(FinalSolid, solid, 'solid_'+ str(ii))
+      ii+=1
+
+
+  dateStop = datetime.datetime.now()
+  if outputDebug:
+    DebugFile.write("Fin, temps de calcul = {0}\n" .format(dateStop - dateStart))
+    DebugFile.close()
+
+
+  return FinalSolid
+
+
+
+def makeBolt(geompy, meanFiletRadius, pitch, height, play=0, NonFiletRadius=0, nbFilets=1, \
+               smoothStartTurns=0, smoothEndTurns=0, pasADroite=True, MakeFuse=False, smoothingDeltaFactor=1.0):
+  """Make a bolt of mean filet radius, pitch and 90° thread angle
+     see function makeNutBolt
+  """
+  return makeNutBolt(geompy, meanFiletRadius, pitch, height, play, True, NonFiletRadius, nbFilets, \
+                       smoothStartTurns, smoothEndTurns, pasADroite, MakeFuse, smoothingDeltaFactor)
+
+
+
+def makeNut(geompy, meanFiletRadius, pitch, height, play=0, NonFiletRadius=-1, nbFilets=1, \
+              smoothStartTurns=0, smoothEndTurns=0, pasADroite=True, MakeFuse=False, smoothingDeltaFactor=1.0):
+  """Make a nut of mean filet radius, pitch and 90° thread angle
+     see function makeNutBolt
+  """              
+  return makeNutBolt(geompy, meanFiletRadius, pitch, height, play, False, NonFiletRadius, nbFilets, \
+                       smoothStartTurns, smoothEndTurns, pasADroite, MakeFuse, smoothingDeltaFactor)
+
+    
+
+def makeNutGquarterOfInch(geompy, height, NonFiletRadius=-1, MakeFuse=False):
+  """Make a nut compatible with the G 1/4" BSP standard, filetage gaz
+     see function makeNutBolt
+  """
+  pitch = 1.337
+  play = 0
+
+  # meanFiletRadius
+  # empiric values tested with the 3d printer PrusaI3, 0.4 nozzle and slic3r 1.1.7
+  # diameter 12.8 is KO, 13.0 in OK for metal bolt whith a bit of self-tapping, 13.2 is better for plastic bolt
+  # after a cold acetone vapor treatment, 13.2 is fine
+  # facteur d'extrusion 1.08 -> 13.4 plus facile à visser
+  # facteur d'extrusion 1.00 -> 12.9 facile à visser
+  meanFiletRadius = 13./2.0
+    
+  return makeNutBolt(geompy, meanFiletRadius, pitch, height, play, False, NonFiletRadius, MakeFuse=MakeFuse)
+
+
+def makeNutGeightOfInch(geompy, height, NonFiletRadius=-1, MakeFuse=False):
+  """Make a nut compatible with the G 1/8" BSP standard, filetage gaz
+     see function makeNutBolt
+  """
+  pitch = 0.907
+  play = 0
+
+  meanFiletRadius = 10.1/2.0    # 10.4 un peu tro grand; 9.7 beaucoup top petit
+    
+  return makeNutBolt(geompy, meanFiletRadius, pitch, height, play, False, NonFiletRadius, MakeFuse=MakeFuse)
+
+
+def makePneumaticPlug(geompy):
+  insideDiameter = 3.0   # trop fragile à 5.5, 4.0
+  maxOutsideDiameter = 8.65
+  minOutsideDiameter = 8.00
+  minMaxDistance     = 3.5
+  extraPipeLength        = minMaxDistance
+  deltaOutRadius = (maxOutsideDiameter - minOutsideDiameter)/2.0
+
+  print sys._getframe().f_code.co_name, "Pneumatic plug: max outside diameter =", maxOutsideDiameter,"    length=", extraPipeLength + 3*minMaxDistance 
+  # axis along OZ, other axis: OY
+  sk = geompy.Sketcher2D()
+  sk.addPoint(insideDiameter/2.0, 0.0)   # départ bord interne
+  sk.addSegmentAbsolute(minOutsideDiameter/2.0, 0.0)   # bord externe
+  sk.addSegmentRelative(0, extraPipeLength)                # fin extra tube
+  sk.addSegmentRelative(deltaOutRadius, 0)                 #  début 1° créneau
+  sk.addSegmentRelative(-deltaOutRadius, minMaxDistance)   #  fin 1° créneau
+  sk.addSegmentRelative(deltaOutRadius, 0)                 #  début 2° créneau
+  sk.addSegmentRelative(-deltaOutRadius, minMaxDistance)   #  fin 2° créneau
+  sk.addSegmentRelative(deltaOutRadius, 0)                 #  début 3° créneau
+  sk.addSegmentRelative(-deltaOutRadius, minMaxDistance)   #  fin 3° créneau
+  sk.addSegmentRelative(-minOutsideDiameter/2.0 + insideDiameter/2.0, 0)
+  sk.close()
+  #Construct local CS by manual definition: 0 - OY - OZ
+  LocalCS_PneumaticPlug = geompy.MakeMarker(0, 0, 0, 0, 1, 0, 0, 0, 1)
+  # geompy.addToStudy( LocalCS_PneumaticPlug, 'LocalCS_PneumaticPlug')
+  Sketch_PneumaticPlug = sk.wire(LocalCS_PneumaticPlug)
+  # geompy.addToStudy( Sketch_PneumaticPlug, 'Sketch_PneumaticPlug')
+  Face_PneumaticPlug = geompy.MakeFaceWires([Sketch_PneumaticPlug], 1)
+  axeOZ = geompy.MakeVectorDXDYDZ(0, 0, 1)
+  PneumaticPlug = geompy.MakeRevolution(Face_PneumaticPlug, axeOZ, 360*math.pi/180.0)
+  # geompy.addToStudy(PneumaticPlug, 'PneumaticPlug')
+  return PneumaticPlug
+
+
+
+# make jt160 pump
+def makePumpJT160(geompy):
+  O = geompy.MakeVertex(0, 0, 0)
+  OX = geompy.MakeVectorDXDYDZ(1, 0, 0)
+  OY = geompy.MakeVectorDXDYDZ(0, 1, 0)
+  OZ = geompy.MakeVectorDXDYDZ(0, 0, 1)
+
+  # corps de la pompe
+  diamCylGros = 26.5
+  longCylGros = 30
+  diamCylPetit = 19.8
+  longCylPetit = 7.5
+
+  # 4 vis de serrage associées à un renflement
+  diamCylVis   = 5
+  longCylVisG  = 10  # longueur dans le gros cylindre
+  longCylVisT  = 1   # longueur de la tête de vis
+  hautRenflVis = 1.3   # épaisseur du renflement de la vis
+  distAxeVisAxeCyl = diamCylGros/2.0 - diamCylVis/2.0 + hautRenflVis
+
+  # tuyau de sortie
+  diamIntPipeOut = 4.0
+  diamExtPipeOut = 7.8
+  longPipeOutFromPupmAxis = 31.2 - diamCylPetit/2.0
+  longPipeOutAxisFromPupmAxis = 5.45
+  longPipeOutAxisFromPupmTopCylPetit = 4.8
+
+  # plaque support
+  largPlaqSupp = 24
+  longPlaqSupp = 25
+  epaiPlaqSupp = 1
+  distFaceExtPlaqueFromPumpAxis = 26.9 /2.0
+
+  # cable
+  distanceOX = -diamCylGros/2.0 + 3
+  distanceOY = 3
+  diamCable  = 3.5
+  longCable  = 8
+
+  PumpArrayObjects = []
+
+  Cyl_Gros  = geompy.MakeCylinderRH(diamCylGros/2.0,  longCylGros)
+  geompy.TranslateDXDYDZ(Cyl_Gros, 0, 0, -longCylGros) 
+  PumpArrayObjects.append(Cyl_Gros)
+
+  Cyl_Petit = geompy.MakeCylinderRH(diamCylPetit/2.0, longCylPetit)
+  PumpArrayObjects.append(Cyl_Petit)
+
+  Cyl_PipeOut = geompy.MakeCylinderRH(diamExtPipeOut/2.0, longPipeOutFromPupmAxis)
+  Cyl_CutPipeOut = geompy.MakeCylinderRH(diamIntPipeOut/2.0, longPipeOutFromPupmAxis)
+  Cyl_PipeOut = geompy.MakeCutList(Cyl_PipeOut, [Cyl_CutPipeOut], True)
+  geompy.Rotate(Cyl_PipeOut, OY, 90*math.pi/180.0)
+  geompy.TranslateDXDYDZ(Cyl_PipeOut, 0, longPipeOutAxisFromPupmAxis, longCylPetit - longPipeOutAxisFromPupmTopCylPetit)
+  # geompy.addToStudy(Cyl_PipeOut, 'Cyl_PipeOut')
+  PumpArrayObjects.append(Cyl_PipeOut)
+
+  PlaqueSupport = geompy.MakeBoxDXDYDZ(epaiPlaqSupp,longPlaqSupp,largPlaqSupp)
+  geompy.TranslateDXDYDZ(PlaqueSupport, -distFaceExtPlaqueFromPumpAxis, -longPlaqSupp/2.0, -longCylGros)
+  # geompy.addToStudy(PlaqueSupport, 'PlaqueSupport')
+  PumpArrayObjects.append(PlaqueSupport)
+
+  Cyl_Cable = geompy.MakeCylinderRH(diamCable/2.0, longCable)
+  geompy.TranslateDXDYDZ(Cyl_Cable, distanceOX, distanceOY, -longCylGros -longCable) 
+  PumpArrayObjects.append(Cyl_Cable)
+
+  Cyl_VisModele = geompy.MakeCylinderRH(diamCylVis/2.0, longCylVisG + longCylVisT)
+  geompy.TranslateDXDYDZ(Cyl_VisModele, distAxeVisAxeCyl, 0, -longCylVisG)
+  # geompy.addToStudy(Cyl_VisModele, 'Cyl_VisModele')
+  for i in range(4):
+      PumpArrayObjects.append(geompy.MakeRotation(Cyl_VisModele, OZ, i*math.pi/2.0) )
+
+  Pump = geompy.MakeCompound(PumpArrayObjects)
+  # geompy.addToStudy(Pump, 'Pump')
+
+  # changement d'orientation de la pompe
+  geompy.Rotate(Pump, OY, -math.pi/2.0)
+  geompy.Rotate(Pump, OZ, math.pi)
+  geompy.TranslateDXDYDZ(Pump, longPipeOutAxisFromPupmTopCylPetit -longCylPetit,
+                         longPipeOutAxisFromPupmAxis, -longPipeOutFromPupmAxis)   
+  return Pump
+
+# make jt160 pump
+def makePumpDC30(geompy):
+  O = geompy.MakeVertex(0, 0, 0)
+  OX = geompy.MakeVectorDXDYDZ(1, 0, 0)
+  OY = geompy.MakeVectorDXDYDZ(0, 1, 0)
+  OZ = geompy.MakeVectorDXDYDZ(0, 0, 1)
+
+  # corps pompe
+  Cube_1 = geompy.MakeBoxDXDYDZ(38, 34.25, 25.7)
+  # pour forer les tubes
+  Cyl_DecoupePassageEau = geompy.MakeCylinderRH(2.75, 50)
+  # outlet
+  Cylinder_1 = geompy.MakeCylinderRH(5.7, 30.7)
+  Cylinder_2 = geompy.MakeCylinderRH(4.95, 32.2)
+  Cylinder_3 = geompy.MakeCylinderRH(4.26, 46)
+  Fuse_Outlet = geompy.MakeFuseList([Cylinder_1, Cylinder_2, Cylinder_3])
+  Cut_Outlet = geompy.MakeCutList(Fuse_Outlet, [Cyl_DecoupePassageEau])
+  Translation_Outlet = geompy.MakeTranslation(Cut_Outlet, 30.3, 13.125, 0)
+  #inlet
+  Cylinder_inlet = geompy.MakeCylinderRH(6.83, 39)
+  Cut_Inlet = geompy.MakeCutList(Cylinder_inlet, [Cyl_DecoupePassageEau])
+  Rotation_Inlet = geompy.MakeRotation(Cut_Inlet, OY, 90*math.pi/180.0)
+  Translation_Inlet = geompy.MakeTranslation(Rotation_Inlet, 0, 21.5, 13)
+  # cable alimentation électrique
+  Cable_elect = geompy.MakeCylinderRH(1.77, 10)
+  geompy.Rotate(Cable_elect, OY, 90*math.pi/180.0)
+  geompy.TranslateDXDYDZ(Cable_elect, -7, 4.2, 13.5)
+  
+  Pompe = geompy.MakeFuseList([Cube_1, Translation_Outlet, Translation_Inlet, Cable_elect])
+  #Pompe_Origin = geompy.MakeVertex(30.3, 13.125, 32.2)
+  #geompy.TranslateTwoPoints(Pompe, Pompe_Origin, Pompe_place)
+  #Pompe_top = geompy.MakeVertex(Pompe_placeX, Pompe_placeY, 8.5)   # point le plus haut de la pompe
+  # geompy.addToStudy( Pompe, 'Pompe' )
+  #--------------------------------
+
+  return Pompe
+
+
+def makePile9V(geompy):
+  Box_big  = geompy.MakeBoxDXDYDZ(26.15,17,45)
+  geompy.TranslateDXDYDZ(Box_big,  -26.15/2.0, -17/2.0,0)
+  Box_plug = geompy.MakeBoxDXDYDZ(25,13.2,8)
+  geompy.TranslateDXDYDZ(Box_plug, -25/2.0   , -13/2.0, 45)
+  return geompy.MakeCompound([Box_big,Box_plug])
+
+
+def makeBearing(geompy, diamAxe, diamMoyeu=0):
+  """Make a bearing
+     diamAxe   = shaft diameter
+     diamMoyeu = 
+  """
+  
+  diamBille = 5.95
+
+  O = geompy.MakeVertex(0, 0, 0)
+  OX = geompy.MakeVectorDXDYDZ(1, 0, 0)
+  OY = geompy.MakeVectorDXDYDZ(0, 1, 0)
+  OZ = geompy.MakeVectorDXDYDZ(0, 0, 1)
+  
+  # jeu entre le rotor (ou le stator) avec la bille
+  #  pour une bille de diam. 6 et un axe de diam 10
+  #     0.12 OK avec un léger frottement (éliminable à l'acétone ?)
+  #     0.3 tro grand; 0.08 trop petit; 0.2 un peu tro grand; 0.15 bien, un poil trop grand
+  jeuBille  = 0.12
+
+  Rlog   = diamBille/2.0 + jeuBille
+  Wroul  = diamBille +1.0
+  angleO = 45
+  angleF = 30
+  angleSoupl = 70
+  Wlevr      = 0.7
+  soupleLevr = 0.7
+
+  # jeu dans la circonférence, nb de billes en moins dans la circonférence des billes attenantes
+  #  pour une bille de diam. 6 et un axe de diam 10:    1/2 bille OK  ; 1/3 trop petit
+  jeuCirc = 1/2.0   
+  
+  filetRadius = 0.2
+
+  # jeu axe = jeu rajouté au rayon de l'axe pour imprimer son logement
+  #  pour une bille de diam. 6 et un axe de diam 10:  0,2 OK;  0.4 trop; 0.08 trop petit
+  jeuAxe  = 0.2
+
+  # jeu moyeur = jeu enlevé au rayon du roulement
+  #  pour une bille de diam. 6 et un axe de diam 10:  0,08 OK
+  jeuMoyeu = 0.08
+
+  # on veut WBroul >= diamBille
+  # on cherche le nb de billes minimum = nbBilles
+  # la circonférence  du chemin des billes passant par leur centre est:
+  # circonfChemBilles = (nbBilles + jeuCirc) x diamBille  # rajoutons un jeu proportionnel à la taille de la bille (jeuCirc < 1)
+  # or
+  # WBroul = circonfChemBilles/2.0/math.pi - (diamAxe/2.0 + jeuAxe) - jeuBille/2.0
+  # WBroul = (nbBilles+0.1) x diamBille /2.0/math.pi - (diamAxe/2.0 + jeuAxe) - jeuBille/2.0
+  # on fait varier le nb de billes de 0 à l'infini,
+  # pour trouver WBroul et nbBilles, on s'arrête quand WBroul >= 6
+  nbBilles = 0
+  while (True) :
+    WBroul = (nbBilles + jeuCirc) * diamBille /2.0/math.pi - (diamAxe/2.0 + jeuAxe) - jeuBille/2.0
+    if WBroul >= diamBille:
+      break;
+    nbBilles += 1
+
+  print "le nombre de billes est:",  nbBilles
+  print "le nombre de billes est:",  nbBilles
+  
+  # Generation du profil intérieur du roulement
+  skI = geompy.Sketcher2D()
+  skI.addPoint(Rlog * math.sin(angleO /180.0*math.pi),
+                 Rlog * math.cos(angleO /180.0*math.pi) )                               # D
+  skI.addSegmentRelative(0, Wlevr)                                                    # C
+
+  # point B
+  Bx = (Rlog + soupleLevr) * math.sin(angleSoupl/180.0*math.pi)
+  By = (Rlog + soupleLevr) * math.cos(angleSoupl/180.0*math.pi)
+  Bz = 0
+  skI.addSegmentAbsolute( Bx, By)
+  pointB = geompy.MakeVertex(Bx, By, Bz)
+  # geompy.addToStudy(pointB, "pointB")
+
+  skI.addSegmentAbsolute(WBroul, Wroul/2.0)                                           # A
+  skI.addSegmentAbsolute(WBroul, -Wroul/2.0)                                          # G
+  skI.addSegmentAbsolute( Rlog * math.sin(angleF /180.0*math.pi), -Wroul/2.0)         # F
+  skI.addSegmentAbsolute( Rlog * math.sin(angleF /180.0*math.pi),
+                          - Rlog * math.cos(angleF /180.0*math.pi))                    # E
+  skI.addArcRadiusAbsolute( Rlog * math.sin(angleO /180.0*math.pi),
+                            Rlog * math.cos(angleO /180.0*math.pi),
+                            Rlog, 0)                                                   # retour à D
+  skI.close()
+  Sketch_RoulIntBrut = skI.wire()
+  # geompy.addToStudy(Sketch_RoulIntBrut, 'Sketch_RoulIntBrut')  
+  
+  SketchFiletPoint = geompy.GetShapesNearPoint(Sketch_RoulIntBrut, pointB, geompy.ShapeType["VERTEX"])
+  geompy.addToStudy(SketchFiletPoint, 'SketchFiletPoint')
+  
+  Sketch_RoulIntFilet1 = geompy.MakeFillet1D (Sketch_RoulIntBrut, filetRadius,
+                                              geompy.GetSubShapesIDs(Sketch_RoulIntBrut,[SketchFiletPoint]) )
+  # geompy.addToStudy(Sketch_RoulIntFilet1 , 'Sketch_RoulIntFilet1 ')
+  geompy.Rotate(Sketch_RoulIntFilet1, OX, 90*math.pi/180.0)
+  geompy.TranslateDXDYDZ(Sketch_RoulIntFilet1 , 0, 0, Wroul/2.0)
+
+  
+  Face_1 = geompy.MakeFaceWires([Sketch_RoulIntFilet1], 1)
+  Face_2 = geompy.MakeMirrorByAxis(Face_1, OZ)
+  Faces  = geompy.MakeCompound([Face_1, Face_2])
+  geompy.TranslateDXDYDZ(Faces, WBroul + diamAxe/2.0 + jeuAxe, 0, 0)
+  Roulement_Brut = geompy.MakeRevolution(Faces, OZ, 360*math.pi/180.0)
+
+  # calcule si le diamètre du moyeu fourni est suffisant sinon le change
+  diamMoyeuMin = int(4*WBroul + diamAxe +2*jeuAxe + 2*jeuMoyeu + 1.0)   # avec arrondi au mm entier supérieur
+  if diamMoyeu < diamMoyeuMin :
+    diamMoyeu = diamMoyeuMin
+
+  print "le diametre du moyeu est:", diamMoyeu
+  diamRoulement = diamMoyeu -2*jeuMoyeu
+  print "le diametre du roulement est:", diamRoulement
+   
+  # rajout du cylindre externe pour faire le joint entre le roulement et le moyeu
+  Cyl_Ext_Brut  = geompy.MakeCylinderRH(diamRoulement/2.0, Wroul)
+  Cyl_Ext_Cut   = geompy.MakeCylinderRH(2*WBroul + diamAxe/2.0 +jeuAxe, Wroul)
+  Cyl_Ext_Moyeu = geompy.MakeCutList(Cyl_Ext_Brut, [Cyl_Ext_Cut])
+
+  # Roulement_Final  = geompy.MakeCompound([Roulement_Brut, Cyl_Ext_Moyeu]) # MakeCompound KO sous slic3R
+  Roulement_Final  = geompy.MakeFuseList([Roulement_Brut, Cyl_Ext_Moyeu])
+  #geompy.Export(Roulement, "/home/moi/data/objets3d/roulements/Roulement-10stl.stl", "STL_Bin")
+
+  return Roulement_Final, diamRoulement
+
+
+
+# fonction créant une surface de la forme d'un tube elliptique. Avec points, ....
+def MakeEllipticPipe01(geompy, points, bigRadii, smallRadii, plain=False, normalVects=None, bigVects=None):
+  """ Fonction fabricant un tuyau elliptique
+      points: liste ordonnées des points, centres  des ellipses = sections du tuyau
+      bigRadii: liste ordonnées des grands rayons des ellipses
+      smallRadii: liste ordonnées des petits rayons des ellipse
+      plain: valeur booléenne, True le tuyau est plein,  False le tuyau n'est qu'une surface
+      normalVects et bigVects: vaiables inutilisées de la fonction geompy.MakeEllipse() 
+      Retourne :
+       1 -> le tuyau
+       2 -> la première face elliptique
+       3 -> la dernière face elliptique 
+  """
+  
+  O = geompy.MakeVertex(0, 0, 0)
+  OX = geompy.MakeVectorDXDYDZ(1, 0, 0)
+  OY = geompy.MakeVectorDXDYDZ(0, 1, 0)
+  OZ = geompy.MakeVectorDXDYDZ(0, 0, 1)
+
+  WireEllipseList = []
+  FaceEllipseList = []
+
+  tubePath = geompy.MakeBezier(points, False)
+  #geompy.addToStudyInFather(O, tubePath, "tubePath")
+
+  if (normalVects==None):
+    normalVects = []
+    for point in points:
+      normalVects.append(OZ)
+      
+  if (bigVects==None):
+    bigVects = []
+    for point in points:
+      bigVects.append(OX)
+  
+  for ii in range(len(points)):
+    #geompy.addToStudyInFather(O, points[ii], "points-" + str(ii)) 
+    WireEllipseList.append(geompy.MakeEllipse(points[ii], normalVects[ii], bigRadii[ii], smallRadii[ii], bigVects[ii]))
+    FaceEllipseList.append(geompy.MakeFaceWires(WireEllipseList[ii], True) )
+    #geompy.addToStudyInFather(O, FaceEllipseList[ii], "FaceEllipse-" + str(ii))
+
+  if plain:  
+    tubeEll = geompy.MakePipeWithDifferentSections(FaceEllipseList, points, tubePath, False,False)  # pour créer un solide plein, mais pb fuse (lenteur)
+  else:
+    tubeEll = geompy.MakePipeWithDifferentSections(WireEllipseList, points, tubePath, False,False) 
+  #geompy.addToStudyInFather(O, tubeEll, "tubeEll")
+  #geompy.addToStudyInFather(O, FaceEllipseList[0], "FaceSud")
+  #geompy.addToStudyInFather(O, FaceEllipseList[len(FaceEllipseList)-1], "FaceNord")  
+  return tubeEll, FaceEllipseList[0], FaceEllipseList[len(FaceEllipseList)-1]
+
+
+
+# fonction créant une surface de la forme d'un tube elliptique sur l'axe OZ, x=y=0, avec l'altitude de chaque point et les rayons
+def MakeEllipticPipe02(geompy, altitudes, bigRadii, smallRadii, tangentes=None, plain=False):
+  """ Fonction fabricant un tuyau elliptique
+      voir la fonction MakeEllipticPipe01
+      le tuyau est construit rectiligne, verticalement de haut en bas sur l'axe OZ, avec x=y=0
+      en plus il y a ici deux entrees:
+        altitudes: liste ordonnées des altitudes des points sur l'axe OZ
+        tangentes: liste ordonnées des tangentes définissant l'angle en degré de la tangente à la paroi du tuyau externe dans le sens OZ
+             O  -> paroi externe du tube parallèle à OZ
+           -9O  -> paroi externe du tube perpandiculaire à OZ, vers l'intérieur  (cas limite impossible)
+            9O  -> paroi externe du tube perpandiculaire à OZ, vers l'intérieur  (cas limite impossible)
+           inférieur à -90  -> l'algorithme de platform-salomé décide tout seul
+  """
+  
+  # les tangeantes définissent l'angle en degré de la tangeant externe dans le sens OZ par rapport à OZ
+  #     O  -> paroi externe du tube parallèle à OZ
+  #   -9O  -> paroi externe du tube perpandiculaire à OZ, vers l'intérieur  (cas limite impossible)
+  #    9O  -> paroi externe du tube perpandiculaire à OZ, vers l'intérieur  (cas limite impossible)
+  # < -90  -> l'algorithme décide tout seul
+
+  dz = 0.01    # valeur d'incrément deltaZ pour imposer le point directeur de la tangente
+  
+  if (tangentes==None):
+    tangentes= []
+    for altitude in altitudes:
+      tangentes.append(-100)
+
+  points=[]
+  bigRadiiExtended =[]
+  smallRadiiExtended =[]
+  
+  for ii in range(len(altitudes)):
+   
+    if(tangentes[ii]>-90) and ii>0:
+      # on rajoute un point tangeante avant
+      points.append(geompy.MakeVertex(0, 0, altitudes[ii] -dz))
+      bigRadiiExtended.append(bigRadii[ii] - dz*math.tan(tangentes[ii]/180.*math.pi))
+      smallRadiiExtended.append(smallRadii[ii] -dz*math.tan(tangentes[ii]/180.*math.pi))
+          
+    points.append(geompy.MakeVertex(0, 0, altitudes[ii]))
+    bigRadiiExtended.append(bigRadii[ii])
+    smallRadiiExtended.append(smallRadii[ii])
+
+    if(tangentes[ii]>-90) and ii<len(altitudes)-1:
+      # on rajoute un point tangeante après
+      points.append(geompy.MakeVertex(0, 0, altitudes[ii] +dz))
+      bigRadiiExtended.append(bigRadii[ii] +dz*math.tan(tangentes[ii]/180.*math.pi))
+      smallRadiiExtended.append(smallRadii[ii] +dz*math.tan(tangentes[ii]/180.*math.pi))
+
+      
+  return MakeEllipticPipe01(geompy, points, bigRadiiExtended, smallRadiiExtended, plain)
+
+
+def MakeEllipticPipe03(geompy, slices, plain=False):
+  """ Fonction fabricant un tuyau elliptique
+      La différence avec la fonction MakeEllipticPipe02  :
+        slices contient une liste de slice
+          chaque slice contient les infos d'une section: [altitude, bigRadius, smallRadius, tangente] 
+  """
+  altitudes = []
+  bigExtRadii = []
+  smallExtRadii = []
+  tangentes = []
+  
+  for slice in slices:
+    altitudes.append(slice[0])
+    bigExtRadii.append(slice[1])
+    smallExtRadii.append(slice[2])
+    tangentes.append(slice[3])
+
+  return MakeEllipticPipe02(geompy, altitudes, bigExtRadii, smallExtRadii, tangentes, plain)
+    
+
+
+
+# fonction créant un tube elliptique creux sur l'axe OZ, x=y=0, avec l'altitude de chaque point et les rayons
+def MakeEllipticTube02(geompy, altitudes, bigExtRadii, smallExtRadii, tangentes, thickness):
+  """ Fonction fabricant un tube elliptique
+      La différence avec la fonction MakeEllipticPipe02 :
+        il n'y a pas de variable plain, puisqu'il s'agit d'un tube à paroi
+        thickness: épaisseur de la paroi
+      Les rayons sont les valeurs externes
+      Ne retourne que le tube
+  """
+  
+  if (tangentes==None):
+    tangentes= []
+    for altitude in altitudes:
+      tangentes.append(-100)
+
+  bigIntRadii = []
+  smallIntRadii = []
+  for ii in range(len(altitudes)):
+    realThickness = thickness
+    if tangentes[ii] >= -90:  # on corrige l'épaisseur quand on connait la tangente
+      realThickness = thickness/math.cos(tangentes[ii]/180.*math.pi)
+      print "realThickness= ", realThickness,   "     tangente= ", tangentes[ii]
+      
+    bigIntRadii.append(bigExtRadii[ii] -realThickness)
+    smallIntRadii.append(smallExtRadii[ii] -realThickness)
+
+  TubeExt, FaceSudExt, FaceNordExt  = MakeEllipticPipe02(geompy, altitudes, bigExtRadii, smallExtRadii, tangentes, plain=False)
+  TubeInt, FaceSudInt, FaceNordInt  = MakeEllipticPipe02(geompy, altitudes, bigIntRadii, smallIntRadii, tangentes, plain=False)
+
+  FaceSud =  geompy.MakeCutList(FaceSudExt,  [FaceSudInt])
+  FaceNord = geompy.MakeCutList(FaceNordExt, [FaceNordInt])
+
+  TubeShell = geompy.MakeShell([TubeExt, TubeInt, FaceSud, FaceNord])
+  TubeSolid = geompy.MakeSolid([TubeShell])
+  return TubeSolid
+
+
+
+# fonction créant un tube elliptique creux sur l'axe OZ, x=y=0, avec l'altitude de chaque point et les rayons
+def MakeEllipticTube03(geompy, slices, thickness):
+  """ Fonction fabricant un tube elliptique
+      La différence avec la fonction MakeEllipticTube02:
+       utilisation de slices, voir explications dans l'aide de la fonction MakeEllipticPipe03
+      Les rayons sont les valeurs externes
+  """
+
+  altitudes = []
+  bigExtRadii = []
+  smallExtRadii = []
+  tangentes = []
+  
+  for slice in slices:
+    altitudes.append(slice[0])
+    bigExtRadii.append(slice[1])
+    smallExtRadii.append(slice[2])
+    tangentes.append(slice[3])
+
+  return MakeEllipticTube02(geompy, altitudes, bigExtRadii, smallExtRadii, tangentes, thickness)
+
+
+# fonction créant un tube elliptique creux sur l'axe OZ, x=y=0, avec l'altitude de chaque point et les rayons
+def MakeEllipticTube12(geompy, altitudes, bigExtRadii, smallExtRadii, tangentes, thickness):
+  """ Fonction fabricant un tube elliptique
+      La différence avec la fonction MakeEllipticTube02 :
+        - thickness  n'est plus un scalaire mais un vecteur de scalaires associés à chaque section
+        - pse de correction d'épaisseur en fonction de la tangeante
+      Ne retourne que le tube
+  """
+  
+  if (tangentes==None):
+    tangentes= []
+    for altitude in altitudes:
+      tangentes.append(-100)
+
+  bigIntRadii = []
+  smallIntRadii = []
+  for ii in range(len(thickness)):
+    bigIntRadii.append(bigExtRadii[ii]     - thickness[ii])
+    smallIntRadii.append(smallExtRadii[ii] - thickness[ii])
+
+  TubeExt, FaceSudExt, FaceNordExt  = MakeEllipticPipe02(geompy, altitudes, bigExtRadii, smallExtRadii, tangentes, plain=False)
+  TubeInt, FaceSudInt, FaceNordInt  = MakeEllipticPipe02(geompy, altitudes, bigIntRadii, smallIntRadii, tangentes, plain=False)
+
+  FaceSud =  geompy.MakeCutList(FaceSudExt,  [FaceSudInt])
+  FaceNord = geompy.MakeCutList(FaceNordExt, [FaceNordInt])
+
+  #geompy.addToStudy(FaceSud, "FaceSud")
+  #geompy.addToStudy(FaceNord, "FaceNord")
+  #geompy.addToStudy(FaceSudExt, "FaceSudExt")
+  #geompy.addToStudy(FaceNordExt, "FaceNordExt")
+  #geompy.addToStudy(TubeExt, "TubeExt")
+  #geompy.addToStudy(TubeInt, "TubeInt")
+  
+  TubeShell = geompy.MakeShell([TubeExt, TubeInt, FaceSud, FaceNord])
+  TubeSolid = geompy.MakeSolid([TubeShell])
+  return TubeSolid
+
+
+# fonction créant un tube elliptique creux sur l'axe OZ, x=y=0, avec l'altitude de chaque point et les rayons
+def MakeEllipticTube13(geompy, slices):
+  """ Fonction fabricant un tube elliptique
+      La différence avec la fonction MakeEllipticTube12:
+       utilisation de slices, voir explications dans l'aide de la fonction MakeEllipticPipe03
+     exemple: ebt_3d.MakeEllipticTube13(geompy, [ [ 0,  5,  3, -100, 1 ],[ 10, 15, 5, -100, 3 ] ])
+  
+  """
+
+  altitudes = []
+  bigExtRadii = []
+  smallExtRadii = []
+  tangentes = []
+  thickness = []
+  
+  for slice in slices:
+    altitudes.append(slice[0])
+    bigExtRadii.append(slice[1])
+    smallExtRadii.append(slice[2])
+    tangentes.append(slice[3])
+    thickness.append(slice[4])
+    
+  return MakeEllipticTube12(geompy, altitudes, bigExtRadii, smallExtRadii, tangentes, thickness)
+
+def getKey1(item):
+  return item[1]
+
+def SortSubShapeIdsByMinDistToPoint(geompy, shape, subShapeType, point):
+  """ retourne une liste de id des subshape de la shape avec sa minDistance au point
+      la liste est classée de la distance la plus petite à la plis grande
+      liste = [ [id, distance], [id, distance], ...]
+      subShapeType = "EDGE" ou ....
+  """
+  IdList = geompy.SubShapeAllIDs(shape, geompy.ShapeType[subShapeType])
+  minDistList = []
+  for id in IdList:
+    edge =  geompy.GetSubShape(shape, [id])
+    minDist = geompy.MinDistance(edge, point)
+    minDistList.append([id,minDist])
+
+  return sorted(minDistList, key=getKey1)
+
+
+
+def MakeWireFromPointList(geompy, ptList):
+  """
+  fabrique un fil à partir d'une liste de points
+  retourne le fil
+  """ 
+  LineLst = []
+  nbPoints = len(ptList)
+  for ii in range(nbPoints):
+    LineLst.append( geompy.MakeLineTwoPnt(ptList[ii], ptList[(ii+1)%nbPoints]))
+  #
+  Wire01  = geompy.MakeWire(LineLst, 1e-07)
+  return Wire01
+
+
+
+def MakeFaceFromPointList(geompy, ptList):
+  """
+  fabrique une face à partir d'une liste de points
+  retourne la face
+  """
+  Face01  = geompy.MakeFaceWires([MakeWireFromPointList(geompy, ptList)], 1)
+  #geompy.addToStudy(Face01, "Face01")
+  return Face01
+
+
+def MakeTriangleW(geompy, height, thickness):
+  """
+  fabrique un triangle d'épaisseur thickness et de hauteur height
+  triangle rectangle isocèle, base débutant sur O et en direction de OX
+  épaisseur sur OY centrée sur O
+  """
+  O = geompy.MakeVertex(0, 0, 0)
+  OX = geompy.MakeVectorDXDYDZ(1, 0, 0)
+  OY = geompy.MakeVectorDXDYDZ(0, 1, 0)
+  OZ = geompy.MakeVectorDXDYDZ(0, 0, 1)
+  dxTri = height
+  dyTri = thickness
+  BrutTriW01d = geompy.MakeBoxDXDYDZ(dxTri, dyTri, dxTri)
+  geompy.TranslateDXDYDZ(BrutTriW01d, 0, -dyTri/2., 0)
+  #geompy.addToStudy(BrutTriW01d, "BrutTriW01d")
+  CommTriW01d  = geompy.MakeBoxDXDYDZ(2*dxTri, 2*dxTri, 2*dxTri)
+  geompy.TranslateDXDYDZ(CommTriW01d,-2*dxTri, -dxTri, 0)
+  geompy.Rotate(CommTriW01d, OY, -math.pi/4.)
+  geompy.TranslateDXDYDZ(CommTriW01d, dxTri, 0, 0)
+  #geompy.addToStudy(CommTriW01d, "CommTriW01d")
+  TriWF01d = geompy.MakeCommonList([BrutTriW01d, CommTriW01d])
+  #geompy.addToStudy(TriWF01d, "TriWF01d")
+  return TriWF01d
+
+
+def MakeTriangle01(geompy, base, height, thickness, OyzSymetrical=False):
+  """
+  fabrique un triangle solide d'épaisseur thickness et de hauteur height
+  triangle rectangle, la base débutant sur O et en direction de OX, la hauteur débutant sur O et en direction de OZ
+  épaisseur sur OY centrée sur O
+  """
+  O = geompy.MakeVertex(0, 0, 0)
+  OX = geompy.MakeVectorDXDYDZ(1, 0, 0)
+  OY = geompy.MakeVectorDXDYDZ(0, 1, 0)
+  OZ = geompy.MakeVectorDXDYDZ(0, 0, 1)
+  ptList= []
+  ptList.append(O)
+  ptList.append(geompy.MakeVertex(base, 0, 0))
+  ptList.append(geompy.MakeVertex(0, 0, height))
+  Face01 = MakeFaceFromPointList(geompy, ptList)
+  #geompy.addToStudy(Face01, "Face01")
+  Triangle01 = geompy.MakePrismVecH(Face01, OY, thickness)
+  if not OyzSymetrical:
+    return Triangle01
+  PlaneOyz = geompy.MakePlane(O, OX, 10)
+  Triangle02 = geompy.MakeMirrorByPlane(Triangle01, PlaneOyz)
+  return geompy.MakeFuseList([Triangle01, Triangle02])
+
+
+def MakeCrayon(geompy, r, hCyl, hCone, x=0, y=0, z=0):
+  """ fabrique un cylindre vertical rayon r, de hauteur hCyl, avec un cône chapeau au sommet de hauteur hCone
+      puis le déplace aup point (x,y,z)
+  """
+  if hCone <= 0 :
+    hCone = 2*tolerance
+  Cyl  = geompy.MakeCylinderRH(r,hCyl)
+  Cone = geompy.MakeConeR1R2H(r, r-hCone, hCone)
+  geompy.TranslateDXDYDZ(Cone, 0, 0, hCyl)
+  Crayon = geompy.MakeFuseList([Cyl,Cone])
+  geompy.TranslateDXDYDZ(Crayon, x, y, z)
+  return Crayon
+
+  #CR = MakeCrayon(10, 50, 3, 10, -20, 0)
+  #geompy.addToStudy(CR, "CR")
