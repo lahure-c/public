@@ -14,4 +14,4 @@ libThreadTest
     
     Library test     commandTest01.py
     
-    Output example   pasDeVis.png
+    Output example   filetages.png
